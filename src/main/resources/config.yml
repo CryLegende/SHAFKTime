@@ -1,0 +1,29 @@
+money-per-second: 4.0
+whitelist-worlds:
+- spawn
+time-format: "{h}h {m}m {s}s"
+min-session: 60
+autosave-delay: 300
+
+bossbar:
+  enabled: true
+  message: '&fAFK récompensé: &b{time} &8| &fGains: &3{money} SHCoins &7(1.{boost}x)'
+  color: BLUE
+  style: SOLID
+actionbar:
+  enabled: true
+  message: '&fAFK récompensé: &b{time} &8| &fGains: &3{money} SHCoins &7(1.{boost}x)'
+
+messages:
+  session-end: |-
+    &7&l« &e&lSH &8&l» &7Vous avez passé &e{time} &7en AFK récompensé
+    &7&l« &e&lSH &8&l» &7Vous avez gagné &e{money} SHCoins
+admin-messages:
+  usage: "Usage: /shafktime <check|add|take|set> <joueur> [temps]"
+  player-not-online: "&7&l« &c&lSH &8&l» &7Le joueur n'est pas en ligne !"
+  time-invalid: "&7&l« &c&lSH &8&l» &7Format de temps invalide."
+  command-unknown: "&8&l« &f&lSH &8&l» &fCommande inconnue, essayer autre chose."
+  added: "&7&l« &a&lSH &8&l» &a{time} &7de temps AFK ajouté à &a{player}"
+  taken: "&7&l« &e&lSH &8&l» &e{time} &7de temps AFK retiré de &e{player}"
+  set: "&7&l« &e&lSH &8&l» &7Temps AFK de &e{player} défini sur &e{time}"
+  check: "&7&l« &e&lSH &8&l» &e{player} &7possède &e{time} &7de temps AFK"
