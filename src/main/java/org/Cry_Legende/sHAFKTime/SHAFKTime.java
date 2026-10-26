@@ -17,6 +17,7 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
@@ -28,12 +29,21 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.logging.Level;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -55,10 +65,26 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
     // Tâche d'autosave stockée pour pouvoir l'annuler
     private BukkitTask autosaveTask;
 
+    // Faux tant que players.yml n'a pas été lu : on n'écrit alors jamais le fichier (voir onDisable)
+    private boolean playersLoaded = false;
+
+    // Réglages lus une seule fois (la config n'est jamais rechargée) : les sessions tournent chaque seconde
+    private Set<String> whitelistWorlds = Set.of();
+    private double moneyPerSecond;
+    private int minSession;
+    private String timeFormat;
+    private boolean actionbarEnabled;
+    private String actionbarMessage;
+    private boolean bossbarEnabled;
+    private String bossbarMessage;
+    private BarColor bossbarColor;
+    private BarStyle bossbarStyle;
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
         configFile = getConfig();
+        loadSettings();
         setupPlayersFile();
 
         if (!setupEconomy()) {
@@ -69,6 +95,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
 
         // Charger les données joueurs depuis players.yml
         loadPlayersData();
+        playersLoaded = true;
 
         getServer().getPluginManager().registerEvents(this, this);
         PluginCommand cmd = getCommand("shafktime");
@@ -76,7 +103,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             cmd.setExecutor(this);
             cmd.setTabCompleter(this);
         }
-        int autosaveDelay = configFile.getInt("autosave-delay", 300);
+        int autosaveDelay = Math.max(1, configFile.getInt("autosave-delay", 300));
         autosaveTask = Bukkit.getScheduler().runTaskTimer(this, this::asyncSavePlayersData, autosaveDelay * 20L, autosaveDelay * 20L);
     }
 
@@ -90,8 +117,33 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         for (AfkSession session : new ArrayList<>(activeSessions.values())) {
             session.endSession();
         }
-        // Le scheduler refuse les tâches d'un plugin en cours d'arrêt : écriture finale synchrone
-        writePlayersData(collectPlayersData());
+        // Le scheduler refuse les tâches d'un plugin en cours d'arrêt : écriture finale synchrone.
+        // Si Vault manquait au démarrage, les données n'ont pas été lues : écrire effacerait tout le fichier.
+        if (playersLoaded) {
+            writePlayersData(collectPlayersData());
+        }
+    }
+
+    // Lit la config une fois pour toutes
+    private void loadSettings() {
+        whitelistWorlds = new HashSet<>(configFile.getStringList("whitelist-worlds"));
+        moneyPerSecond = configFile.getDouble("money-per-second", 1.0);
+        minSession = configFile.getInt("min-session", 300);
+        timeFormat = configFile.getString("time-format", "{h}h:{m}m:{s}s");
+        actionbarEnabled = configFile.getBoolean("actionbar.enabled", false);
+        actionbarMessage = ChatColor.translateAlternateColorCodes('&', configFile.getString("actionbar.message", ""));
+        bossbarEnabled = configFile.getBoolean("bossbar.enabled", false);
+        bossbarMessage = ChatColor.translateAlternateColorCodes('&', configFile.getString("bossbar.message", ""));
+        try {
+            bossbarColor = BarColor.valueOf(configFile.getString("bossbar.color", "BLUE").toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            bossbarColor = BarColor.BLUE;
+        }
+        try {
+            bossbarStyle = BarStyle.valueOf(configFile.getString("bossbar.style", "SOLID").toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            bossbarStyle = BarStyle.SOLID;
+        }
     }
 
     // Initialise le fichier players.yml
@@ -105,7 +157,14 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         try {
             playersConfig.load(playersFile);
         } catch (IOException | InvalidConfigurationException e) {
-            e.printStackTrace();
+            // Fichier illisible : on le met de côté avant que l'autosave ne l'écrase par des données vides
+            getLogger().log(Level.SEVERE, "players.yml illisible, copie de sauvegarde puis démarrage à vide", e);
+            try {
+                Files.copy(playersFile.toPath(), new File(getDataFolder(), "players.yml.corrompu-" + System.currentTimeMillis()).toPath());
+            } catch (IOException copyError) {
+                getLogger().log(Level.SEVERE, "Sauvegarde de players.yml impossible", copyError);
+            }
+            playersConfig = new YamlConfiguration();
         }
     }
 
@@ -161,10 +220,18 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                 asyncConfig.set("players." + entry.getKey().toString() + ".afkTime", entry.getValue());
             }
         }
+        // Fichier temporaire puis remplacement : un arrêt brutal ne laisse jamais un players.yml tronqué
+        Path target = playersFile.toPath();
+        Path tmp = target.resolveSibling(playersFile.getName() + ".tmp");
         try {
-            asyncConfig.save(playersFile);
+            Files.writeString(tmp, asyncConfig.saveToString(), StandardCharsets.UTF_8);
+            try {
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
-            e.printStackTrace();
+            getLogger().log(Level.SEVERE, "Impossible d'écrire players.yml", e);
         }
     }
 
@@ -207,11 +274,11 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         }
     }
 
-    @EventHandler
+    // MONITOR : un autre plugin peut annuler la téléportation après nous, la session ne doit alors pas changer
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onTeleport(PlayerTeleportEvent event) {
-        if (event.isCancelled()) return; // Ne rien faire si l'événement a été annulé
         Player p = event.getPlayer();
-        event.getTo();
+        if (event.getTo().getWorld() == null) return; // monde pas encore chargé : on ne sait rien décider
         if (isWorldWhitelisted(event.getTo().getWorld())) {
             if (afkBalances.getOrDefault(p.getUniqueId(), 0L) > 0 && !activeSessions.containsKey(p.getUniqueId())) {
                 startSession(p);
@@ -246,8 +313,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
 
     // Vérifie si le monde est dans la whitelist de la config
     private boolean isWorldWhitelisted(World world) {
-        List<String> whitelist = configFile.getStringList("whitelist-worlds");
-        return whitelist.contains(world.getName());
+        return whitelistWorlds.contains(world.getName());
     }
 
     /**
@@ -274,7 +340,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
 
     // Formate le temps selon le pattern défini dans la config (ex: "{h}h:{m}m:{s}s")
     private String formatTime(long seconds) {
-        String format = configFile.getString("time-format", "{h}h:{m}m:{s}s");
+        String format = timeFormat;
         long h = seconds / 3600;
         long m = (seconds % 3600) / 60;
         long s = seconds % 60;
@@ -336,7 +402,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             }
             switch (subCmd) {
                 case "add": {
-                    long newTime = current + amount;
+                    long newTime = current > Long.MAX_VALUE - amount ? Long.MAX_VALUE : current + amount;
                     if (activeSessions.containsKey(uuid)) {
                         activeSessions.get(uuid).addTime(amount);
                     } else {
@@ -391,24 +457,24 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         return null;
     }
 
+    private static final Pattern TIME_PATTERN = Pattern.compile("^(\\d+)([smhd])$");
+
     // Analyse une durée (ex : "5s", "10m", "2h", "1d")
     private long parseTime(String input) {
-        Pattern pattern = Pattern.compile("^(\\d+)([smhd])$");
-        Matcher matcher = pattern.matcher(input);
+        Matcher matcher = TIME_PATTERN.matcher(input);
         if (!matcher.find()) return -1;
-        long time = Long.parseLong(matcher.group(1));
-        String unit = matcher.group(2);
-        switch (unit) {
-            case "s":
-                return time;
-            case "m":
-                return time * 60;
-            case "h":
-                return time * 3600;
-            case "d":
-                return time * 86400;
-            default:
-                return -1;
+        try {
+            long time = Long.parseLong(matcher.group(1));
+            return switch (matcher.group(2)) {
+                case "s" -> time;
+                case "m" -> Math.multiplyExact(time, 60L);
+                case "h" -> Math.multiplyExact(time, 3600L);
+                case "d" -> Math.multiplyExact(time, 86400L);
+                default -> -1L;
+            };
+        } catch (NumberFormatException | ArithmeticException e) {
+            // Trop grand pour un long : même réponse qu'un format invalide
+            return -1;
         }
     }
 
@@ -439,7 +505,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         }
 
         public void addTime(long time) {
-            remainingBalance += time;
+            remainingBalance = remainingBalance > Long.MAX_VALUE - time ? Long.MAX_VALUE : remainingBalance + time;
         }
 
         public void setTime(long time) {
@@ -447,23 +513,8 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         }
 
         public void start() {
-            if (configFile.getBoolean("bossbar.enabled", false)) {
-                String bossMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("bossbar.message", ""));
-                String colorStr = configFile.getString("bossbar.color", "BLUE");
-                String styleStr = configFile.getString("bossbar.style", "SOLID");
-                BarColor color;
-                BarStyle style;
-                try {
-                    color = BarColor.valueOf(colorStr.toUpperCase());
-                } catch (IllegalArgumentException e) {
-                    color = BarColor.BLUE;
-                }
-                try {
-                    style = BarStyle.valueOf(styleStr.toUpperCase());
-                } catch (IllegalArgumentException e) {
-                    style = BarStyle.SOLID;
-                }
-                bossBar = Bukkit.createBossBar(bossMsg, color, style);
+            if (bossbarEnabled) {
+                bossBar = Bukkit.createBossBar(bossbarMessage, bossbarColor, bossbarStyle);
                 bossBar.addPlayer(player);
             }
             // Démarrer la tâche de mise à jour du timer et des messages chaque seconde
@@ -475,7 +526,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                 if (remainingBalance > 0) {
                     remainingBalance--;
                     sessionSeconds++;
-                    double gain = configFile.getDouble("money-per-second", 1.0) * boostMultiplier;
+                    double gain = moneyPerSecond * boostMultiplier;
                     moneyEarned += gain;
                 } else {
                     endSession();
@@ -489,15 +540,15 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
          * Met à jour l'actionbar et la bossbar avec le temps restant, l'argent gagné et le boost.
          */
         private void updateDisplay() {
-            if (configFile.getBoolean("actionbar.enabled", false)) {
-                String actionMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("actionbar.message", ""));
+            if (actionbarEnabled) {
+                String actionMsg = actionbarMessage;
                 actionMsg = actionMsg.replace("{time}", formatTime(remainingBalance))
                     .replace("{money}", String.valueOf((int) moneyEarned))
                     .replace("{boost}", String.valueOf(boostPercentage));
                 player.sendActionBar(actionMsg);
             }
             if (bossBar != null) {
-                String updatedMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("bossbar.message", ""));
+                String updatedMsg = bossbarMessage;
                 updatedMsg = updatedMsg.replace("{time}", formatTime(remainingBalance))
                     .replace("{money}", String.valueOf((int) moneyEarned))
                     .replace("{boost}", String.valueOf(boostPercentage));
@@ -527,7 +578,6 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             if (moneyEarned > 0) {
                 economy.depositPlayer(player, moneyEarned);
             }
-            int minSession = configFile.getInt("min-session", 300);
             if (sessionSeconds >= minSession) {
                 String msg = ChatColor.translateAlternateColorCodes('&', configFile.getString("messages.session-end",
                     "Tu as passé {time} en AFK et tu as gagné {money} !"));
