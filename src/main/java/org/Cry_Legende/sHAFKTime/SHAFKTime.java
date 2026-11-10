@@ -1,6 +1,10 @@
 package org.Cry_Legende.sHAFKTime;
 
 import net.milkbowl.vault.economy.Economy;
+import org.Cry_Legende.sHAFKTime.network.AfkDatabase;
+import org.Cry_Legende.sHAFKTime.network.NetworkAfk;
+import org.Cry_Legende.sHAFKTime.network.NetworkLink;
+import org.Cry_Legende.sHAFKTime.network.ShNetworkLink;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.World;
@@ -34,6 +38,7 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -41,8 +46,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.logging.Level;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -67,6 +75,11 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
 
     // Faux tant que players.yml n'a pas été lu : on n'écrit alors jamais le fichier (voir onDisable)
     private boolean playersLoaded = false;
+
+    // Non nul seulement avec SHNetwork : le temps AFK de chaque joueur est dans la base partagée
+    private NetworkAfk network;
+    // Mode réseau : joueurs dont le temps n'est pas encore lu en base (ni session, ni commande, ni écriture pour eux)
+    private final Set<UUID> pending = new HashSet<>();
 
     // Réglages lus une seule fois (la config n'est jamais rechargée) : les sessions tournent chaque seconde
     private Set<String> whitelistWorlds = Set.of();
@@ -93,11 +106,21 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             return;
         }
 
-        // Charger les données joueurs depuis players.yml
-        loadPlayersData();
+        enableNetwork();
+
+        // Charger les données joueurs depuis players.yml (en mode réseau, le temps de chaque joueur est lu en base à sa connexion)
+        if (network == null) {
+            loadPlayersData();
+        }
         playersLoaded = true;
 
         getServer().getPluginManager().registerEvents(this, this);
+        if (network != null) {
+            // joueurs déjà là (rechargement à chaud) : lus comme à une arrivée
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                beginNetworkJoin(online);
+            }
+        }
         PluginCommand cmd = getCommand("shafktime");
         if (cmd != null) {
             cmd.setExecutor(this);
@@ -120,8 +143,98 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         // Le scheduler refuse les tâches d'un plugin en cours d'arrêt : écriture finale synchrone.
         // Si Vault manquait au démarrage, les données n'ont pas été lues : écrire effacerait tout le fichier.
         if (playersLoaded) {
-            writePlayersData(collectPlayersData());
+            if (network != null) {
+                network.save(collectLocalBalances());
+            } else {
+                writePlayersData(collectPlayersData());
+            }
         }
+        if (network != null) {
+            network.stop();
+        }
+    }
+
+    /**
+     * Passe en mode réseau si SHNetwork est installé et 'reseau.actif' est vrai. Les classes qui touchent à SHNetwork
+     * ne sont chargées qu'ici : sans lui, le plugin se comporte exactement comme avant.
+     */
+    private void enableNetwork() {
+        if (!configFile.getBoolean("reseau.actif", true)) return;
+        if (!Bukkit.getPluginManager().isPluginEnabled("SHNetwork")) return;
+        AfkDatabase db = null;
+        try {
+            NetworkLink link = ShNetworkLink.open();
+            db = new AfkDatabase(
+                configFile.getString("reseau.base-de-donnees.url", ""),
+                configFile.getString("reseau.base-de-donnees.utilisateur", ""),
+                configFile.getString("reseau.base-de-donnees.mot-de-passe", ""),
+                Math.max(250, configFile.getInt("reseau.base-de-donnees.delai-ms", 3000)));
+            db.createTable();
+            Duration wait = Duration.ofSeconds(Math.max(1, configFile.getInt("reseau.attente-max-secondes", 10)));
+            NetworkAfk net = new NetworkAfk(this, db, link, wait);
+            net.start(this::flushPlayer);
+            network = net;
+            getLogger().info("SHNetwork détecté : le temps AFK est dans la base partagée.");
+        } catch (Exception | LinkageError e) {
+            if (db != null) db.close();
+            getLogger().log(Level.SEVERE, "SHNetwork présent mais inutilisable, temps AFK local à ce serveur : " + e);
+        }
+    }
+
+    // Mode réseau : lit le temps du joueur qui arrive (déjà lu à sa pré-connexion, sinon en base maintenant)
+    private void beginNetworkJoin(Player p) {
+        UUID uuid = p.getUniqueId();
+        OptionalLong loaded = network.takePreloaded(uuid);
+        if (loaded.isPresent()) {
+            applyBalance(uuid, loaded.getAsLong());
+            return;
+        }
+        pending.add(uuid);
+        network.loadLater(uuid, seconds -> {
+            if (!pending.remove(uuid)) return; // parti entre-temps
+            applyBalance(uuid, seconds);
+            Player online = Bukkit.getPlayer(uuid);
+            if (online != null && isWorldWhitelisted(online.getWorld())) {
+                startSession(online);
+            }
+        });
+    }
+
+    private void applyBalance(UUID uuid, long seconds) {
+        if (seconds > 0) {
+            afkBalances.put(uuid, seconds);
+        } else {
+            afkBalances.remove(uuid);
+        }
+    }
+
+    // Temps du joueur à cet instant : celui de sa session en cours, sinon celui de sa réserve
+    private long liveBalance(UUID uuid) {
+        AfkSession session = activeSessions.get(uuid);
+        return session != null ? session.getRemainingTime() : afkBalances.getOrDefault(uuid, 0L);
+    }
+
+    // Mode réseau : temps des joueurs de ce serveur dont la lecture en base est faite
+    private Map<UUID, Long> collectLocalBalances() {
+        Map<UUID, Long> balances = new HashMap<>();
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            UUID uuid = online.getUniqueId();
+            if (!pending.contains(uuid)) {
+                balances.put(uuid, liveBalance(uuid));
+            }
+        }
+        return balances;
+    }
+
+    // Mode réseau, au départ du joueur (fil principal, après la fin de sa session) : écrit son temps puis l'oublie
+    private CompletableFuture<Void> flushPlayer(Player p) {
+        UUID uuid = p.getUniqueId();
+        if (pending.remove(uuid)) {
+            return CompletableFuture.completedFuture(null); // temps jamais lu : on n'écrase rien
+        }
+        long balance = liveBalance(uuid);
+        afkBalances.remove(uuid);
+        return network.save(Map.of(uuid, balance));
     }
 
     // Lit la config une fois pour toutes
@@ -197,6 +310,10 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
      * Rassemble les données (incluant celles des sessions actives) et lance la sauvegarde asynchrone.
      */
     private void asyncSavePlayersData() {
+        if (network != null) {
+            network.save(collectLocalBalances());
+            return;
+        }
         // Récupérer les données sur le thread principal
         Map<UUID, Long> dataToSave = collectPlayersData();
         // Effectuer la sauvegarde asynchrone
@@ -241,6 +358,9 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player p = event.getPlayer();
         UUID uuid = p.getUniqueId();
+        if (network != null) {
+            beginNetworkJoin(p);
+        }
         if (offlineSessions.containsKey(uuid)) {
             OfflineSessionData data = offlineSessions.remove(uuid);
             String message = ChatColor.translateAlternateColorCodes('&', configFile.getString("messages.session-end",
@@ -371,6 +491,10 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         String checkMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.check",
             "{player} possède {time} de temps AFK."));
 
+        if (args.length == 1 && args[0].equalsIgnoreCase("import")) {
+            importPlayersFile(sender);
+            return true;
+        }
         if (args.length < 2) {
             sender.sendMessage(usageMsg);
             return true;
@@ -378,10 +502,19 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         String subCmd = args[0].toLowerCase();
         Player target = Bukkit.getPlayerExact(args[1]);
         if (target == null) {
+            if (network != null && forwardToOtherServer(sender, subCmd, args, usageMsg, timeInvalid, commandUnknown, checkMsg)) {
+                return true;
+            }
             sender.sendMessage(playerNotOnline);
             return true;
         }
         UUID uuid = target.getUniqueId();
+        if (network != null && pending.contains(uuid)) {
+            sender.sendMessage(ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.loading",
+                "&7&l« &e&lSH &8&l» &7Le temps AFK de &e{player} &7est en cours de chargement, réessaie dans un instant.")
+                .replace("{player}", target.getName())));
+            return true;
+        }
         long current;
         // Récupère le temps courant depuis la session active si présente
         if (activeSessions.containsKey(uuid)) {
@@ -411,6 +544,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                             startSession(target);
                         }
                     }
+                    writeThrough(uuid);
                     sender.sendMessage(addedMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
                     break;
                 }
@@ -421,6 +555,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                     } else {
                         afkBalances.put(uuid, newTime);
                     }
+                    writeThrough(uuid);
                     sender.sendMessage(takenMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
                     break;
                 }
@@ -433,6 +568,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                             startSession(target);
                         }
                     }
+                    writeThrough(uuid);
                     sender.sendMessage(setMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
                     break;
                 }
@@ -443,11 +579,87 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         return true;
     }
 
+    // Mode réseau : écrit tout de suite en base le temps d'un joueur de ce serveur après une commande d'administration
+    private void writeThrough(UUID uuid) {
+        if (network != null) {
+            network.save(Map.of(uuid, liveBalance(uuid)));
+        }
+    }
+
+    /**
+     * Mode réseau : la commande vise un joueur connecté sur un autre serveur. add, take et set y sont exécutés,
+     * là où se trouve sa session ; check lit la base (la valeur peut retarder de la durée de la sauvegarde automatique).
+     *
+     * @return vrai si le joueur est sur un autre serveur (la commande est traitée ou refusée)
+     */
+    private boolean forwardToOtherServer(CommandSender sender, String subCmd, String[] args, String usageMsg,
+                                         String timeInvalid, String commandUnknown, String checkMsg) {
+        NetworkLink link = network.link();
+        Optional<NetworkLink.Remote> found = link.find(args[1]).filter(r -> !r.server().equalsIgnoreCase(link.serverName()));
+        if (found.isEmpty()) {
+            return false;
+        }
+        NetworkLink.Remote remote = found.get();
+        if (subCmd.equals("check")) {
+            network.read(remote.uuid(), seconds -> {
+                if (seconds == null) {
+                    sender.sendMessage(ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.database-error",
+                        "&7&l« &c&lSH &8&l» &7La base du réseau ne répond pas.")));
+                } else {
+                    sender.sendMessage(checkMsg.replace("{time}", formatTime(seconds)).replace("{player}", remote.name()));
+                }
+            });
+            return true;
+        }
+        if (!subCmd.equals("add") && !subCmd.equals("take") && !subCmd.equals("set")) {
+            sender.sendMessage(commandUnknown);
+            return true;
+        }
+        if (args.length < 3) {
+            sender.sendMessage(usageMsg);
+            return true;
+        }
+        if (parseTime(args[2]) < 0) {
+            sender.sendMessage(timeInvalid);
+            return true;
+        }
+        link.runFor(remote.name(), "shafktime " + subCmd + " " + remote.name() + " " + args[2]);
+        sender.sendMessage(ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.forwarded",
+            "&7&l« &e&lSH &8&l» &e{player} &7est sur le serveur &e{server}&7 : la commande lui a été &etransmise&7.")
+            .replace("{player}", remote.name()).replace("{server}", remote.server())));
+        return true;
+    }
+
+    // /shafktime import : copie les temps de players.yml dans la base du réseau, sans rien écraser
+    private void importPlayersFile(CommandSender sender) {
+        if (network == null) {
+            sender.sendMessage(ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.import-no-network",
+                "&7&l« &c&lSH &8&l» &7Cette commande demande le &cmode réseau &7(SHNetwork installé et base joignable).")));
+            return;
+        }
+        Map<UUID, Long> balances = new HashMap<>();
+        if (playersConfig.isConfigurationSection("players")) {
+            for (String key : playersConfig.getConfigurationSection("players").getKeys(false)) {
+                try {
+                    balances.put(UUID.fromString(key), playersConfig.getLong("players." + key + ".afkTime", 0));
+                } catch (IllegalArgumentException e) {
+                    getLogger().warning("UUID invalide dans players.yml: " + key);
+                }
+            }
+        }
+        network.importBalances(balances, result -> sender.sendMessage(ChatColor.translateAlternateColorCodes('&',
+            result == null
+                ? configFile.getString("admin-messages.import-failed", "&7&l« &c&lSH &8&l» &7L'importation a échoué, &cvérifiez la console&7.")
+                : configFile.getString("admin-messages.import-done",
+                    "&7&l« &a&lSH &8&l» &7Importation terminée : &a{imported} &7joueur(s) ajouté(s), &a{present} &7déjà présent(s).")
+                    .replace("{imported}", String.valueOf(result[0])).replace("{present}", String.valueOf(result[1])))));
+    }
+
     // Complétion d'onglets optimisée pour la commande /shafktime
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return Arrays.asList("check", "add", "take", "set");
+            return network != null ? Arrays.asList("check", "add", "take", "set", "import") : Arrays.asList("check", "add", "take", "set");
         } else if (args.length == 2) {
             // Retourner null pour laisser le serveur suggérer les noms de joueurs en ligne
             return null;

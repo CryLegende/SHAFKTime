@@ -21,6 +21,21 @@ Utilisé sur : **Opale**.
 ## Dépendances
 
 - Obligatoires : `Vault`
+- Optionnelles : `SHNetwork` (mode réseau)
+
+## Mode réseau
+
+Avec **SHNetwork** installé (et `reseau.actif: true`, valeur par défaut), plusieurs serveurs de jeu partagent le temps AFK :
+
+- il est en MariaDB (table `shafktime` : `uuid`, `seconds`) au lieu de `players.yml` ;
+- à la connexion, une fois que l'autre serveur a fini de sauvegarder le joueur, son temps est lu en base ;
+- tant que le joueur est sur un serveur, la mémoire de ce serveur fait foi (la session AFK décompte en mémoire) ; la base reçoit sa valeur à chaque sauvegarde automatique, après chaque commande d'administration et à son départ, avant que l'autre serveur ne le lise ;
+- `add`, `take` et `set` visant un joueur d'un autre serveur lui sont transmis et exécutés là où se trouve sa session ; `check` lit la base ;
+- le temps déjà dans `players.yml` se copie une fois avec `/shafktime import` (rien n'est écrasé).
+
+Les mondes autorisés (`whitelist-worlds`) n'existent que sur le serveur du spawn : les sessions AFK ne tournent que là. Le temps, lui, se remplit depuis n'importe quel serveur (votes, boutique), d'où la base partagée.
+
+Sans SHNetwork, ou sans les clés `reseau` dans la configuration, le plugin se comporte comme avant : `players.yml`. Si la base est injoignable au démarrage, il reste en mode local. La table se crée toute seule, ou à la main avec `sql/schema.sql`.
 
 ## Commandes
 
