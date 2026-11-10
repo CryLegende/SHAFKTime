@@ -17,11 +17,9 @@ import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Level;
@@ -30,8 +28,8 @@ import java.util.logging.Level;
  * Mode réseau : le temps AFK de chaque joueur est dans la base partagée au lieu de {@code players.yml}.
  *
  * <ul>
- *   <li>à la connexion (avant que le joueur n'entre) : une fois le départ de l'autre serveur confirmé,
- *       son temps est lu en base ;</li>
+ *   <li>à la connexion : une fois le départ de l'autre serveur confirmé, son temps est lu en base (en attendant,
+ *       aucune session AFK ne démarre pour lui) ;</li>
  *   <li>tant que le joueur est sur un serveur, la mémoire de ce serveur fait foi (la session AFK décompte en mémoire) ;
  *       la base reçoit sa valeur à chaque sauvegarde automatique, à chaque commande d'administration et à son départ ;</li>
  *   <li>au départ : la barrière de SHNetwork attend que cette écriture soit finie avant que l'autre serveur ne lise ;</li>
@@ -45,7 +43,7 @@ public final class NetworkAfk implements Listener {
     private static final int LOAD_RETRY_MAX = 60;
     private static final long PRELOAD_KEEP_MS = 120_000L;
 
-    private record Preloaded(long seconds, long at) {
+    private record Preloaded(CompletableFuture<Long> seconds, long at) {
     }
 
     private final SHAFKTime plugin;
@@ -94,44 +92,71 @@ public final class NetworkAfk implements Listener {
 
     // ------------------------------------------------------------------ lecture
 
-    /** Fil asynchrone de Paper : on peut attendre le départ de l'autre serveur et la base ici. */
+    /**
+     * Lance la lecture du temps dès la pré-connexion, sans l'attendre : le serveur quitté ne sauvegarde le joueur
+     * qu'une fois cette connexion terminée (le proxy ferme l'ancienne connexion après), attendre ici bloquerait la
+     * connexion jusqu'au délai maximal. La lecture se fait sur le fil de la base une fois le départ confirmé.
+     */
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPreLogin(AsyncPlayerPreLoginEvent event) {
         if (event.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED) {
             return;
         }
         UUID uuid = event.getUniqueId();
+        String name = event.getName();
         long now = System.currentTimeMillis();
         preloaded.values().removeIf(p -> now - p.at() > PRELOAD_KEEP_MS);
-        try {
-            Boolean saved = link.awaitSaved(uuid, waitMax).get(waitMax.toMillis() + 2000L, TimeUnit.MILLISECONDS);
-            if (!Boolean.TRUE.equals(saved)) {
-                plugin.getLogger().warning("Départ de " + event.getName() + " non confirmé par l'autre serveur : temps AFK relu quand même.");
+        CompletableFuture<Long> seconds = new CompletableFuture<>();
+        preloaded.put(uuid, new Preloaded(seconds, now));
+        link.awaitSaved(uuid, waitMax).whenComplete((saved, error) -> {
+            if (error != null || !Boolean.TRUE.equals(saved)) {
+                plugin.getLogger().warning("Départ de " + name + " non confirmé par l'autre serveur"
+                    + (error != null ? " (" + error + ")" : "") + " : temps AFK relu quand même.");
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException | TimeoutException e) {
-            plugin.getLogger().warning("Départ de " + event.getName() + " non confirmé (" + e + ") : temps AFK relu quand même.");
-        }
-        try {
-            preloaded.put(uuid, new Preloaded(db.load(uuid), now));
-        } catch (SQLException e) {
-            // le joueur entre quand même : son temps est relu dès que la base répond (voir loadLater)
-            plugin.getLogger().warning("Temps AFK de " + event.getName() + " non lu en base : " + e.getMessage());
-        }
+            try {
+                io.execute(() -> {
+                    try {
+                        seconds.complete(db.load(uuid));
+                    } catch (SQLException e) {
+                        // le joueur entre quand même : son temps est relu dès que la base répond (voir loadLater)
+                        plugin.getLogger().warning("Temps AFK de " + name + " non lu en base : " + e.getMessage());
+                        seconds.completeExceptionally(e);
+                    }
+                });
+            } catch (RejectedExecutionException stopped) {
+                seconds.completeExceptionally(stopped);
+            }
+        });
     }
 
-    /** Temps lu à la pré-connexion du joueur qui entre, ou vide si la lecture n'a pas eu lieu. */
+    /** Temps lu à la pré-connexion du joueur qui entre, s'il l'est déjà ; sinon vide (voir loadLater). */
     public OptionalLong takePreloaded(UUID uuid) {
-        Preloaded loaded = preloaded.remove(uuid);
-        return loaded != null ? OptionalLong.of(loaded.seconds()) : OptionalLong.empty();
+        Preloaded loaded = preloaded.get(uuid);
+        if (loaded == null || !loaded.seconds().isDone() || loaded.seconds().isCompletedExceptionally()) {
+            return OptionalLong.empty();
+        }
+        preloaded.remove(uuid, loaded);
+        return OptionalLong.of(loaded.seconds().join());
     }
 
     /**
-     * Lit le temps d'un joueur dont la pré-connexion n'est pas passée par ici (rechargement à chaud, base absente
-     * à sa connexion). Réessaie tant que la base ne répond pas ; {@code onMain} reçoit le temps sur le fil principal.
+     * Lit le temps d'un joueur qui entre : reprend la lecture lancée à sa pré-connexion, sinon (rechargement à chaud,
+     * base absente à sa connexion) lit en base. Réessaie tant que la base ne répond pas ; {@code onMain} reçoit le
+     * temps sur le fil principal.
      */
     public void loadLater(UUID uuid, Consumer<Long> onMain) {
+        Preloaded started = preloaded.remove(uuid);
+        if (started != null) {
+            // lecture lancée à la pré-connexion, pas encore finie : reprise telle quelle, relancée si elle a échoué
+            started.seconds().whenComplete((seconds, error) -> {
+                if (error == null) {
+                    toMain(() -> onMain.accept(seconds));
+                } else {
+                    submit(() -> loadOnce(uuid, onMain, 0));
+                }
+            });
+            return;
+        }
         submit(() -> loadOnce(uuid, onMain, 0));
     }
 
