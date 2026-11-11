@@ -39,16 +39,32 @@ Sans SHNetwork, ou sans les clés `reseau` dans la configuration, le plugin se c
 
 ## Commandes
 
-| Commande | Alias | Description | Permission |
-|---|---|---|---|
-| `/shafktime` | — | Commande de gestion du temps AFK. | `shafktime.admin` |
+Racine d'administration `/shafktime` (console comprise), sans alias. Sans argument, elle rappelle les sous-commandes que l'on a le droit d'utiliser.
+
+| Commande | Description | Permission |
+|---|---|---|
+| `/shafktime check <joueur>` | Temps AFK en réserve. | `shafktime.admin.check` |
+| `/shafktime add <joueur> <durée>` | Ajoute du temps (`5s`, `10m`, `2h`, `1d`). | `shafktime.admin.add` |
+| `/shafktime take <joueur> <durée>` | Retire du temps. | `shafktime.admin.take` |
+| `/shafktime set <joueur> <durée>` | Fixe le temps. | `shafktime.admin.set` |
+| `/shafktime import` | Mode réseau : copie les temps de `players.yml` dans la base, sans rien écraser. | `shafktime.admin.import` |
+| `/shafktime reload` | Recharge `config.yml` et `messages.yml`. Un fichier illisible ne change rien : le message donne le fichier et l'erreur. `players.yml` n'est jamais relu, la section `reseau` demande un redémarrage. | `shafktime.admin.reload` |
+
+`add`, `take`, `set` et `check` visent un joueur connecté. `add` est aussi lancé en console par les récompenses de vote, la boutique et les caisses.
 
 ## Permissions
 
 | Permission | Description | Par défaut |
 |---|---|---|
-| `shafktime.admin` | Permet d'utiliser les commandes administratives du plugin SHAFKTime. | `op` |
+| `shafktime.admin` | Toute l'administration (parent de toutes les permissions `shafktime.admin.*`). | `op` |
+| `shafktime.admin.check` | `/shafktime check`. | `op` |
+| `shafktime.admin.add` | `/shafktime add`. | `op` |
+| `shafktime.admin.take` | `/shafktime take`. | `op` |
+| `shafktime.admin.set` | `/shafktime set`. | `op` |
+| `shafktime.admin.import` | `/shafktime import`. | `op` |
+| `shafktime.admin.reload` | `/shafktime reload`. | `op` |
 | `shafktime.boost` | Permission de base pour appliquer un boost au gain (à utiliser avec le suffixe numérique, ex: shafktime.boost.20). | `true` |
+| `shafktime.boost.<n>` | Gain majoré de n % (la plus grande valeur est retenue), par exemple `shafktime.boost.20`. | non déclarée |
 
 ## Configuration
 
@@ -56,8 +72,12 @@ Fichiers par défaut repris du serveur (secrets remplacés par `CHANGE_ME`). Cli
 
 <pre>
 plugins/SHAFKTime/
-└── <a href="src/main/resources/config.yml">config.yml</a>
+├── <a href="src/main/resources/config.yml">config.yml</a>     réglages du gain, mondes, bossbar et actionbar, mode réseau
+├── <a href="src/main/resources/messages.yml">messages.yml</a>   messages du plugin
+└── players.yml    temps AFK de chaque joueur (données, créé par le plugin)
 </pre>
+
+Au premier démarrage, `messages.yml` est créé à partir des sections `messages` et `admin-messages` de l'ancien `config.yml` si elles existent, puis complété par les valeurs du jar. Ces sections ne sont plus lues ensuite. Le texte de la bossbar et celui de l'actionbar restent dans `config.yml`, avec leurs options d'affichage.
 
 ## Compilation
 

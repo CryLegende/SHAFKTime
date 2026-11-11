@@ -33,6 +33,7 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -46,6 +47,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -66,6 +68,8 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
     private final Map<UUID, OfflineSessionData> offlineSessions = new HashMap<>();
 
     private FileConfiguration configFile;
+    // Textes de messages.yml (bossbar et actionbar restent dans config.yml, avec leurs options)
+    private YamlConfiguration messages = new YamlConfiguration();
     // Fichier de données pour les joueurs (players.yml)
     private File playersFile;
     private FileConfiguration playersConfig;
@@ -98,6 +102,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         saveDefaultConfig();
         configFile = getConfig();
         loadSettings();
+        loadMessagesAtStart();
         setupPlayersFile();
 
         if (!setupEconomy()) {
@@ -126,8 +131,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             cmd.setExecutor(this);
             cmd.setTabCompleter(this);
         }
-        int autosaveDelay = Math.max(1, configFile.getInt("autosave-delay", 300));
-        autosaveTask = Bukkit.getScheduler().runTaskTimer(this, this::asyncSavePlayersData, autosaveDelay * 20L, autosaveDelay * 20L);
+        scheduleAutosave();
     }
 
     @Override
@@ -237,7 +241,78 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         return network.save(Map.of(uuid, balance));
     }
 
-    // Lit la config une fois pour toutes
+    // Planifie (ou replanifie) la sauvegarde périodique avec l'intervalle de la config
+    private void scheduleAutosave() {
+        if (autosaveTask != null) {
+            autosaveTask.cancel();
+        }
+        int autosaveDelay = Math.max(1, configFile.getInt("autosave-delay", 300));
+        autosaveTask = Bukkit.getScheduler().runTaskTimer(this, this::asyncSavePlayersData, autosaveDelay * 20L, autosaveDelay * 20L);
+    }
+
+    // Texte de messages.yml, couleurs appliquées
+    private String message(String key) {
+        return ChatColor.translateAlternateColorCodes('&', messages.getString(key, key));
+    }
+
+    private YamlConfiguration jarMessages() {
+        try (InputStreamReader reader = new InputStreamReader(Objects.requireNonNull(getResource("messages.yml")), StandardCharsets.UTF_8)) {
+            return YamlConfiguration.loadConfiguration(reader);
+        } catch (IOException | RuntimeException e) {
+            return new YamlConfiguration();
+        }
+    }
+
+    // Ancien emplacement d'un texte dans config.yml : messages.session-end, admin-messages.<clé>
+    private static String legacyPath(String key) {
+        return key.equals("session-end") ? "messages.session-end" : "admin-messages." + key;
+    }
+
+    /**
+     * messages.yml du serveur, complété par les valeurs du jar. S'il n'existe pas, il est créé à partir des textes
+     * de config.yml (sections messages et admin-messages, textes du serveur conservés) ; ces sections ne sont plus
+     * lues ensuite.
+     */
+    private YamlConfiguration readMessages(FileConfiguration source) throws IOException, InvalidConfigurationException {
+        File file = new File(getDataFolder(), "messages.yml");
+        YamlConfiguration defaults = jarMessages();
+        if (!file.exists()) {
+            YamlConfiguration created = new YamlConfiguration();
+            created.options().setHeader(List.of(
+                "Messages de SHAFKTime. Couleurs avec &. Placeholders : {time}, {money}, {boost}, {player}, {server},",
+                "{commands}, {file}, {error}, {imported}, {present}. Le texte de la bossbar et celui de l'actionbar",
+                "sont dans config.yml, avec leurs options."));
+            for (String key : defaults.getKeys(false)) {
+                String legacy = legacyPath(key);
+                created.set(key, source.contains(legacy, true) ? source.getString(legacy) : defaults.getString(key));
+            }
+            getDataFolder().mkdirs();
+            created.save(file);
+        }
+        YamlConfiguration loaded = new YamlConfiguration();
+        loaded.load(file);
+        loaded.setDefaults(defaults);
+        return loaded;
+    }
+
+    // Au démarrage : un messages.yml illisible n'est jamais réécrit, les textes du jar servent en attendant
+    private void loadMessagesAtStart() {
+        try {
+            messages = readMessages(configFile);
+        } catch (IOException | InvalidConfigurationException e) {
+            getLogger().severe("messages.yml illisible (" + errorText(e) + "), textes du jar utilisés. Corrigez le fichier puis faites /shafktime reload.");
+            messages = new YamlConfiguration();
+            messages.setDefaults(jarMessages());
+        }
+    }
+
+    private static String errorText(Exception error) {
+        String text = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+        text = text.replaceAll("[\\s&§]+", " ").strip();
+        return text.length() > 200 ? text.substring(0, 200) + "..." : text;
+    }
+
+    // Lit les réglages de config.yml
     private void loadSettings() {
         whitelistWorlds = new HashSet<>(configFile.getStringList("whitelist-worlds"));
         moneyPerSecond = configFile.getDouble("money-per-second", 1.0);
@@ -363,8 +438,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         }
         if (offlineSessions.containsKey(uuid)) {
             OfflineSessionData data = offlineSessions.remove(uuid);
-            String message = ChatColor.translateAlternateColorCodes('&', configFile.getString("messages.session-end",
-                "Tu as passé {time} en AFK et tu as gagné {money} !"));
+            String message = message("session-end");
             message = message.replace("{time}", formatTime(data.sessionSeconds))
                 .replace("{money}", String.valueOf(data.moneyEarned))
                 .replace("{boost}", String.valueOf(data.boostPercentage));
@@ -470,36 +544,69 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
     }
 
     // -------------------- GESTION DES COMMANDES --------------------
-    // Commandes : /shafktime check <joueur>, add, take, set
+    // Commandes : /shafktime check <joueur>, add, take, set, import, reload. Chaque sous-commande a sa permission
+    // shafktime.admin.<nom> ; shafktime.admin les donne toutes.
+    private static final List<String> SUBCOMMANDS = List.of("check", "add", "take", "set", "import", "reload");
+
+    private boolean can(CommandSender sender, String sub) {
+        return sender.hasPermission("shafktime.admin." + sub);
+    }
+
+    // Sous-commandes que l'expéditeur peut utiliser (import seulement en mode réseau)
+    private List<String> allowedSubcommands(CommandSender sender) {
+        List<String> result = new ArrayList<>();
+        for (String sub : SUBCOMMANDS) {
+            if (sub.equals("import") && network == null) continue;
+            if (can(sender, sub)) result.add(sub);
+        }
+        return result;
+    }
+
+    // Une seule ligne d'usage, limitée aux sous-commandes permises
+    private String usageLine(CommandSender sender) {
+        List<String> allowed = allowedSubcommands(sender);
+        if (allowed.isEmpty()) {
+            return message("no-permission");
+        }
+        return message("admin-usage").replace("{commands}", String.join("|", allowed));
+    }
+
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        // Récupération des messages d'administration depuis la config
-        String usageMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.usage",
-            "Usage: /shafktime <check|add|take|set> <joueur> [temps]"));
-        String playerNotOnline = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.player-not-online",
-            "Le joueur n'est pas en ligne !"));
-        String timeInvalid = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.time-invalid",
-            "Format de temps invalide."));
-        String commandUnknown = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.command-unknown",
-            "Commande inconnue."));
-        String addedMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.added",
-            "Ajouté {time} à {player}."));
-        String takenMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.taken",
-            "Enlevé {time} à {player}."));
-        String setMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.set",
-            "Temps AFK de {player} mis à {time}."));
-        String checkMsg = ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.check",
-            "{player} possède {time} de temps AFK."));
+        String subCmd = args.length == 0 ? "" : args[0].toLowerCase(Locale.ROOT);
+        if (!SUBCOMMANDS.contains(subCmd)) {
+            sender.sendMessage(usageLine(sender));
+            return true;
+        }
+        if (!can(sender, subCmd)) {
+            sender.sendMessage(message("no-permission"));
+            return true;
+        }
+        String usageMsg = usageLine(sender);
+        String playerNotOnline = message("player-not-online");
+        String timeInvalid = message("time-invalid");
+        String commandUnknown = message("command-unknown");
+        String addedMsg = message("added");
+        String takenMsg = message("taken");
+        String setMsg = message("set");
+        String checkMsg = message("check");
 
-        if (args.length == 1 && args[0].equalsIgnoreCase("import")) {
-            importPlayersFile(sender);
+        if (subCmd.equals("reload")) {
+            reloadAll(sender);
+            return true;
+        }
+        if (subCmd.equals("import")) {
+            if (args.length == 1) {
+                importPlayersFile(sender);
+            } else {
+                sender.sendMessage(usageMsg);
+            }
             return true;
         }
         if (args.length < 2) {
             sender.sendMessage(usageMsg);
             return true;
         }
-        String subCmd = args[0].toLowerCase();
         Player target = Bukkit.getPlayerExact(args[1]);
         if (target == null) {
             if (network != null && forwardToOtherServer(sender, subCmd, args, usageMsg, timeInvalid, commandUnknown, checkMsg)) {
@@ -510,9 +617,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         }
         UUID uuid = target.getUniqueId();
         if (network != null && pending.contains(uuid)) {
-            sender.sendMessage(ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.loading",
-                "&7&l« &e&lSH &8&l» &7Le temps AFK de &e{player} &7est en cours de chargement, réessaie dans un instant.")
-                .replace("{player}", target.getName())));
+            sender.sendMessage(message("loading").replace("{player}", target.getName()));
             return true;
         }
         long current;
@@ -603,8 +708,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         if (subCmd.equals("check")) {
             network.read(remote.uuid(), seconds -> {
                 if (seconds == null) {
-                    sender.sendMessage(ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.database-error",
-                        "&7&l« &c&lSH &8&l» &7La base du réseau ne répond pas.")));
+                    sender.sendMessage(message("database-error"));
                 } else {
                     sender.sendMessage(checkMsg.replace("{time}", formatTime(seconds)).replace("{player}", remote.name()));
                 }
@@ -624,17 +728,14 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             return true;
         }
         link.runFor(remote.name(), "shafktime " + subCmd + " " + remote.name() + " " + args[2]);
-        sender.sendMessage(ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.forwarded",
-            "&7&l« &e&lSH &8&l» &e{player} &7est sur le serveur &e{server}&7 : la commande lui a été &etransmise&7.")
-            .replace("{player}", remote.name()).replace("{server}", remote.server())));
+        sender.sendMessage(message("forwarded").replace("{player}", remote.name()).replace("{server}", remote.server()));
         return true;
     }
 
     // /shafktime import : copie les temps de players.yml dans la base du réseau, sans rien écraser
     private void importPlayersFile(CommandSender sender) {
         if (network == null) {
-            sender.sendMessage(ChatColor.translateAlternateColorCodes('&', configFile.getString("admin-messages.import-no-network",
-                "&7&l« &c&lSH &8&l» &7Cette commande demande le &cmode réseau &7(SHNetwork installé et base joignable).")));
+            sender.sendMessage(message("import-no-network"));
             return;
         }
         Map<UUID, Long> balances = new HashMap<>();
@@ -647,26 +748,71 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                 }
             }
         }
-        network.importBalances(balances, result -> sender.sendMessage(ChatColor.translateAlternateColorCodes('&',
-            result == null
-                ? configFile.getString("admin-messages.import-failed", "&7&l« &c&lSH &8&l» &7L'importation a échoué, &cvérifiez la console&7.")
-                : configFile.getString("admin-messages.import-done",
-                    "&7&l« &a&lSH &8&l» &7Importation terminée : &a{imported} &7joueur(s) ajouté(s), &a{present} &7déjà présent(s).")
-                    .replace("{imported}", String.valueOf(result[0])).replace("{present}", String.valueOf(result[1])))));
+        network.importBalances(balances, result -> sender.sendMessage(result == null
+            ? message("import-failed")
+            : message("import-done").replace("{imported}", String.valueOf(result[0])).replace("{present}", String.valueOf(result[1]))));
     }
 
-    // Complétion d'onglets optimisée pour la commande /shafktime
+    /**
+     * /shafktime reload : relit config.yml (réglages, bossbar, actionbar) et messages.yml. Les deux fichiers sont lus
+     * à part et vérifiés d'abord : si l'un est illisible, rien ne change. players.yml et la base ne sont ni relus
+     * ni écrits ; la section reseau demande un redémarrage.
+     */
+    private void reloadAll(CommandSender sender) {
+        File configPath = new File(getDataFolder(), "config.yml");
+        if (!configPath.exists()) saveDefaultConfig();
+        YamlConfiguration fresh = new YamlConfiguration();
+        try {
+            fresh.load(configPath);
+        } catch (IOException | InvalidConfigurationException e) {
+            reloadFailed(sender, "config.yml", e);
+            return;
+        }
+        try (InputStreamReader reader = new InputStreamReader(Objects.requireNonNull(getResource("config.yml")), StandardCharsets.UTF_8)) {
+            fresh.setDefaults(YamlConfiguration.loadConfiguration(reader));
+        } catch (IOException | RuntimeException ignored) {
+            // sans les valeurs du jar, celles du code s'appliquent
+        }
+        YamlConfiguration freshMessages;
+        try {
+            freshMessages = readMessages(fresh);
+        } catch (IOException | InvalidConfigurationException e) {
+            reloadFailed(sender, "messages.yml", e);
+            return;
+        }
+        configFile = fresh;
+        messages = freshMessages;
+        loadSettings();
+        scheduleAutosave();
+        sender.sendMessage(message("reload-ok"));
+    }
+
+    private void reloadFailed(CommandSender sender, String file, Exception error) {
+        String detail = errorText(error);
+        getLogger().warning("Rechargement annulé, " + file + " illisible : " + detail);
+        sender.sendMessage(message("reload-error").replace("{file}", file).replace("{error}", detail));
+    }
+
+    // Complétion d'onglets, limitée aux sous-commandes que l'expéditeur peut utiliser
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return network != null ? Arrays.asList("check", "add", "take", "set", "import") : Arrays.asList("check", "add", "take", "set");
-        } else if (args.length == 2) {
-            // Retourner null pour laisser le serveur suggérer les noms de joueurs en ligne
+            String start = args[0].toLowerCase(Locale.ROOT);
+            return allowedSubcommands(sender).stream().filter(sub -> sub.startsWith(start)).toList();
+        }
+        String sub = args[0].toLowerCase(Locale.ROOT);
+        if (!SUBCOMMANDS.contains(sub) || !can(sender, sub)) {
+            return List.of();
+        }
+        boolean hasTarget = sub.equals("check") || sub.equals("add") || sub.equals("take") || sub.equals("set");
+        if (hasTarget && args.length == 2) {
+            // null : le serveur propose les noms des joueurs en ligne
             return null;
-        } else if (args.length == 3) {
+        }
+        if (hasTarget && !sub.equals("check") && args.length == 3) {
             return Arrays.asList("5s", "5m", "1h", "1d");
         }
-        return null;
+        return List.of();
     }
 
     private static final Pattern TIME_PATTERN = Pattern.compile("^(\\d+)([smhd])$");
@@ -791,8 +937,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                 economy.depositPlayer(player, moneyEarned);
             }
             if (sessionSeconds >= minSession) {
-                String msg = ChatColor.translateAlternateColorCodes('&', configFile.getString("messages.session-end",
-                    "Tu as passé {time} en AFK et tu as gagné {money} !"));
+                String msg = message("session-end");
                 msg = msg.replace("{time}", formatTime(sessionSeconds))
                     .replace("{money}", String.valueOf((int) moneyEarned))
                     .replace("{boost}", String.valueOf(boostPercentage));

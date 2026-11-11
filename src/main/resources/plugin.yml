@@ -14,13 +14,38 @@ libraries:
 
 commands:
   shafktime:
-    description: Commande de gestion du temps AFK.
-    usage: /shafktime <check|add|take|set|import> <joueur> [temps]
-    permission: shafktime.admin
+    description: Administration du temps AFK récompensé (check, add, take, set, import, reload).
+    usage: /shafktime <check|add|take|set|import|reload>
+    permission: shafktime.admin.check;shafktime.admin.add;shafktime.admin.take;shafktime.admin.set;shafktime.admin.import;shafktime.admin.reload
 
 permissions:
   shafktime.admin:
-    description: Permet d'utiliser les commandes administratives du plugin SHAFKTime.
+    description: Toute l'administration de SHAFKTime.
+    default: op
+    children:
+      shafktime.admin.check: true
+      shafktime.admin.add: true
+      shafktime.admin.take: true
+      shafktime.admin.set: true
+      shafktime.admin.import: true
+      shafktime.admin.reload: true
+  shafktime.admin.check:
+    description: Voir le temps AFK en réserve d'un joueur (/shafktime check).
+    default: op
+  shafktime.admin.add:
+    description: Ajouter du temps AFK à un joueur (/shafktime add).
+    default: op
+  shafktime.admin.take:
+    description: Retirer du temps AFK à un joueur (/shafktime take).
+    default: op
+  shafktime.admin.set:
+    description: Fixer le temps AFK d'un joueur (/shafktime set).
+    default: op
+  shafktime.admin.import:
+    description: Copier players.yml dans la base partagée, mode réseau (/shafktime import).
+    default: op
+  shafktime.admin.reload:
+    description: Recharger config.yml et messages.yml (/shafktime reload).
     default: op
   shafktime.boost:
     description: 'Permission de base pour appliquer un boost au gain (à utiliser avec le suffixe numérique, ex: shafktime.boost.20).'

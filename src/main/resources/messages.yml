@@ -1,0 +1,30 @@
+# Messages de SHAFKTime. Couleurs avec &.
+# Placeholders : {time}, {money}, {boost} (session), {player}, {server}, {commands} (sous-commandes permises à
+# l'expéditeur), {file} et {error} (fichier illisible), {imported} et {present} (import).
+# Le texte de la bossbar et celui de l'actionbar sont dans config.yml, avec leurs options.
+
+# Fin d'une session d'AFK récompensé, envoyé au joueur.
+session-end: |-
+  &7&l« &e&lSH &8&l» &7Vous avez passé &e{time} &7en AFK récompensé
+  &7&l« &e&lSH &8&l» &7Vous avez gagné &e{money} SHCoins
+
+# Commande /shafktime
+admin-usage: "&7&l« &e&lSH &8&l» &7Utilisation : &e/shafktime <{commands}>&7."
+no-permission: "&7&l« &c&lSH &8&l» &cVous n'avez pas la permission d'utiliser cette commande."
+player-not-online: "&7&l« &c&lSH &8&l» &7Le joueur n'est pas en ligne !"
+time-invalid: "&7&l« &c&lSH &8&l» &7Format de temps invalide."
+command-unknown: "&8&l« &f&lSH &8&l» &fCommande inconnue, essayer autre chose."
+added: "&7&l« &a&lSH &8&l» &a{time} &7de temps AFK ajouté à &a{player}"
+taken: "&7&l« &e&lSH &8&l» &e{time} &7de temps AFK retiré de &e{player}"
+set: "&7&l« &e&lSH &8&l» &7Temps AFK de &e{player} défini sur &e{time}"
+check: "&7&l« &e&lSH &8&l» &e{player} &7possède &e{time} &7de temps AFK"
+reload-ok: "&7&l« &a&lSH &8&l» &7Configuration rechargée. La section &areseau&7 (base partagée, SHNetwork) demande un &aredémarrage&7."
+reload-error: "&7&l« &c&lSH &8&l» &7Rechargement annulé, l'ancienne configuration reste en place. &c{file}&7 : &c{error}"
+
+# Mode réseau
+forwarded: "&7&l« &e&lSH &8&l» &e{player} &7est sur le serveur &e{server}&7 : la commande lui a été &etransmise&7."
+loading: "&7&l« &e&lSH &8&l» &7Le temps AFK de &e{player} &7est en cours de chargement, réessaie dans un instant."
+database-error: "&7&l« &c&lSH &8&l» &7La base du réseau ne répond pas."
+import-done: "&7&l« &a&lSH &8&l» &7Importation terminée : &a{imported} &7joueur(s) ajouté(s), &a{present} &7déjà présent(s)."
+import-failed: "&7&l« &c&lSH &8&l» &7L'importation a échoué, &cvérifiez la console&7."
+import-no-network: "&7&l« &c&lSH &8&l» &7Cette commande demande le &cmode réseau &7(SHNetwork installé et base joignable)."

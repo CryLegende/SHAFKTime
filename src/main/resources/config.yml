@@ -7,19 +7,27 @@
 # (voir la section 'reseau' en bas du fichier) ; les mondes autorisés n'existent que sur le serveur du spawn,
 # les sessions AFK ne tournent donc que là.
 #
-# Commandes (permission shafktime.admin) :
+# Commandes (racine d'administration, console comprise) :
 #   /shafktime check <joueur>          Temps AFK en réserve.
 #   /shafktime add <joueur> <durée>    Ajoute du temps (5s, 10m, 2h, 1d).
 #   /shafktime take <joueur> <durée>   Retire du temps.
 #   /shafktime set <joueur> <durée>    Fixe le temps.
 #   /shafktime import                  Avec SHNetwork : copie les temps de players.yml dans la base, sans rien écraser.
+#   /shafktime reload                  Recharge config.yml et messages.yml ; un fichier illisible ne change rien.
+#                                      players.yml n'est jamais relu. 'reseau' demande un redémarrage.
 #   Avec SHNetwork, add, take et set vers un joueur d'un autre serveur lui sont transmis ; check lit la base.
 #
-# Permissions :
-#   shafktime.admin          Utiliser /shafktime (par défaut : op).
-#   shafktime.boost.<n>      Gain majoré de n % (la plus grande valeur est retenue, par exemple shafktime.boost.20).
+# Permissions (op par défaut) :
+#   shafktime.admin            Parent de toutes les permissions d'administration :
+#     shafktime.admin.check      /shafktime check
+#     shafktime.admin.add        /shafktime add
+#     shafktime.admin.take       /shafktime take
+#     shafktime.admin.set        /shafktime set
+#     shafktime.admin.import     /shafktime import
+#     shafktime.admin.reload     /shafktime reload
+#   shafktime.boost.<n>        Gain majoré de n % (la plus grande valeur est retenue, par exemple shafktime.boost.20).
 #
-# Placeholders des messages : {time}, {money}, {boost}, {player}.
+# Les messages sont dans messages.yml. Placeholders du texte de la bossbar et de l'actionbar : {time}, {money}, {boost}.
 #
 # ======================================================================== #
 
@@ -38,27 +46,6 @@ bossbar:
 actionbar:
   enabled: true
   message: '&fAFK récompensé: &b{time} &8| &fGains: &3{money} SHCoins &7(1.{boost}x)'
-
-messages:
-  session-end: |-
-    &7&l« &e&lSH &8&l» &7Vous avez passé &e{time} &7en AFK récompensé
-    &7&l« &e&lSH &8&l» &7Vous avez gagné &e{money} SHCoins
-admin-messages:
-  usage: "Usage: /shafktime <check|add|take|set> <joueur> [temps]"
-  player-not-online: "&7&l« &c&lSH &8&l» &7Le joueur n'est pas en ligne !"
-  time-invalid: "&7&l« &c&lSH &8&l» &7Format de temps invalide."
-  command-unknown: "&8&l« &f&lSH &8&l» &fCommande inconnue, essayer autre chose."
-  added: "&7&l« &a&lSH &8&l» &a{time} &7de temps AFK ajouté à &a{player}"
-  taken: "&7&l« &e&lSH &8&l» &e{time} &7de temps AFK retiré de &e{player}"
-  set: "&7&l« &e&lSH &8&l» &7Temps AFK de &e{player} défini sur &e{time}"
-  check: "&7&l« &e&lSH &8&l» &e{player} &7possède &e{time} &7de temps AFK"
-  # Mode réseau
-  forwarded: "&7&l« &e&lSH &8&l» &e{player} &7est sur le serveur &e{server}&7 : la commande lui a été &etransmise&7."
-  loading: "&7&l« &e&lSH &8&l» &7Le temps AFK de &e{player} &7est en cours de chargement, réessaie dans un instant."
-  database-error: "&7&l« &c&lSH &8&l» &7La base du réseau ne répond pas."
-  import-done: "&7&l« &a&lSH &8&l» &7Importation terminée : &a{imported} &7joueur(s) ajouté(s), &a{present} &7déjà présent(s)."
-  import-failed: "&7&l« &c&lSH &8&l» &7L'importation a échoué, &cvérifiez la console&7."
-  import-no-network: "&7&l« &c&lSH &8&l» &7Cette commande demande le &cmode réseau &7(SHNetwork installé et base joignable)."
 
 # Mode réseau. Actif seulement si SHNetwork est installé et 'actif' vaut true : le temps AFK est alors dans la base
 # partagée (table shafktime : uuid, seconds) au lieu de players.yml. Il est lu à la connexion du joueur, une fois que
