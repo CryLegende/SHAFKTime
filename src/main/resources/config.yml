@@ -31,9 +31,9 @@
 #
 # ======================================================================== #
 
-money-per-second: 4.0
+money-per-second: 1.0
 whitelist-worlds:
-- spawn
+- world
 time-format: "{h}h {m}m {s}s"
 min-session: 60
 autosave-delay: 300
@@ -58,8 +58,8 @@ reseau:
   # le joueur avant de lire son temps
   attente-max-secondes: 10
   base-de-donnees:
-    url: "jdbc:mariadb://127.0.0.1:3306/bo_net"
-    utilisateur: shafktime
+    url: "jdbc:mariadb://127.0.0.1:3306/minecraft"
+    utilisateur: CHANGE_ME
     mot-de-passe: CHANGE_ME
     # Délai maximal de connexion et de réponse de la base, en millisecondes
     delai-ms: 3000
