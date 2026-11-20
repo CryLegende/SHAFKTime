@@ -16,6 +16,7 @@
 #   /shafktime reload                  Recharge config.yml et messages.yml ; un fichier illisible ne change rien.
 #                                      players.yml n'est jamais relu. 'reseau' demande un redémarrage.
 #   Avec SHNetwork, add, take et set vers un joueur d'un autre serveur lui sont transmis ; check lit la base.
+#   Depuis la console, add, take et set ne répondent qu'en cas d'erreur.
 #
 # Permissions (op par défaut) :
 #   shafktime.admin            Parent de toutes les permissions d'administration :

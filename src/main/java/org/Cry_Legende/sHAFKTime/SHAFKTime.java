@@ -586,6 +586,8 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
         String playerNotOnline = message("player-not-online");
         String timeInvalid = message("time-invalid");
         String commandUnknown = message("command-unknown");
+        // La console (votes, boxes, quêtes) en lance des centaines par jour : pas de compte rendu, seulement les erreurs
+        boolean console = (sender instanceof org.bukkit.command.ConsoleCommandSender || sender instanceof org.bukkit.command.RemoteConsoleCommandSender);
         String addedMsg = message("added");
         String takenMsg = message("taken");
         String setMsg = message("set");
@@ -650,7 +652,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                         }
                     }
                     writeThrough(uuid);
-                    sender.sendMessage(addedMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
+                    if (!console) sender.sendMessage(addedMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
                     break;
                 }
                 case "take": {
@@ -661,7 +663,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                         afkBalances.put(uuid, newTime);
                     }
                     writeThrough(uuid);
-                    sender.sendMessage(takenMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
+                    if (!console) sender.sendMessage(takenMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
                     break;
                 }
                 case "set": {
@@ -674,7 +676,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
                         }
                     }
                     writeThrough(uuid);
-                    sender.sendMessage(setMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
+                    if (!console) sender.sendMessage(setMsg.replace("{time}", formatTime(amount)).replace("{player}", target.getName()));
                     break;
                 }
                 default:
