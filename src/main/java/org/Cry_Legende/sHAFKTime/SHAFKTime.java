@@ -440,7 +440,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             OfflineSessionData data = offlineSessions.remove(uuid);
             String message = message("session-end");
             message = message.replace("{time}", formatTime(data.sessionSeconds))
-                .replace("{money}", String.valueOf(data.moneyEarned))
+                .replace("{money}", montant(data.moneyEarned))
                 .replace("{boost}", String.valueOf(data.boostPercentage));
             p.sendMessage(message);
         }
@@ -903,14 +903,14 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             if (actionbarEnabled) {
                 String actionMsg = actionbarMessage;
                 actionMsg = actionMsg.replace("{time}", formatTime(remainingBalance))
-                    .replace("{money}", String.valueOf((int) moneyEarned))
+                    .replace("{money}", montant(moneyEarned))
                     .replace("{boost}", String.valueOf(boostPercentage));
                 player.sendActionBar(actionMsg);
             }
             if (bossBar != null) {
                 String updatedMsg = bossbarMessage;
                 updatedMsg = updatedMsg.replace("{time}", formatTime(remainingBalance))
-                    .replace("{money}", String.valueOf((int) moneyEarned))
+                    .replace("{money}", montant(moneyEarned))
                     .replace("{boost}", String.valueOf(boostPercentage));
                 bossBar.setTitle(updatedMsg);
                 double progress = (double) remainingBalance / Math.max(1, sessionSeconds + remainingBalance);
@@ -941,7 +941,7 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             if (sessionSeconds >= minSession) {
                 String msg = message("session-end");
                 msg = msg.replace("{time}", formatTime(sessionSeconds))
-                    .replace("{money}", String.valueOf((int) moneyEarned))
+                    .replace("{money}", montant(moneyEarned))
                     .replace("{boost}", String.valueOf(boostPercentage));
                 if (player.isOnline()) {
                     player.sendMessage(msg);
@@ -964,5 +964,10 @@ public class SHAFKTime extends JavaPlugin implements Listener, CommandExecutor, 
             this.moneyEarned = moneyEarned;
             this.boostPercentage = boostPercentage;
         }
+    }
+
+    /** Montant entier avec espace des milliers, comme Essentials sur SkyHand : « 1 500 ». */
+    private static String montant(double valeur) {
+        return String.format(java.util.Locale.ROOT, "%,d", (long) valeur).replace(',', ' ');
     }
 }
